@@ -106,21 +106,20 @@ impl BarChart {
     }
 
     /// Stacks the bars on top of another chart.
+    /// Each bar is stacked on the bars with the same [`Bar::argument`] in the other charts
+    /// (compared exactly).
     /// Positive values are stacked on top of other positive values.
     /// Negative values are stacked below other negative values.
     #[inline]
     pub fn stack_on(mut self, others: &[&Self]) -> Self {
         for (index, bar) in self.bars.iter_mut().enumerate() {
+            let bars_below = others
+                .iter()
+                .filter_map(|other_chart| other_chart.bar_at_argument(bar.argument, index));
             let new_base_offset = if bar.value.is_sign_positive() {
-                others
-                    .iter()
-                    .filter_map(|other_chart| other_chart.bars.get(index).map(|bar| bar.upper()))
-                    .max_by_key(|value| value.ord())
+                bars_below.map(Bar::upper).max_by_key(|value| value.ord())
             } else {
-                others
-                    .iter()
-                    .filter_map(|other_chart| other_chart.bars.get(index).map(|bar| bar.lower()))
-                    .min_by_key(|value| value.ord())
+                bars_below.map(Bar::lower).min_by_key(|value| value.ord())
             };
 
             if let Some(value) = new_base_offset {
@@ -128,6 +127,17 @@ impl BarChart {
             }
         }
         self
+    }
+
+    /// The bar at the given argument, if any.
+    ///
+    /// The bar at `index_hint` is checked first,
+    /// since stacked charts usually have their bars in the same order.
+    fn bar_at_argument(&self, argument: f64, index_hint: usize) -> Option<&Bar> {
+        match self.bars.get(index_hint) {
+            Some(bar) if bar.argument == argument => Some(bar),
+            _ => self.bars.iter().find(|bar| bar.argument == argument),
+        }
     }
 
     /// Name of this plot item.
@@ -418,5 +428,28 @@ impl RectElement for Bar {
         };
         let decimals = ((-scale.abs().log10()).ceil().at_least(0.0) as usize).at_most(6);
         crate::label::format_number(self.value, decimals)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Bars should be stacked on the bars with the same argument,
+    /// even when the charts have a different number of bars.
+    #[test]
+    fn stack_on_matches_bars_by_argument() {
+        let below = BarChart::new(
+            "below",
+            vec![Bar::new(1.0, 1.0), Bar::new(2.0, 2.0), Bar::new(3.0, 3.0)],
+        );
+        let above = BarChart::new(
+            "above",
+            vec![Bar::new(2.0, 10.0), Bar::new(3.0, -10.0), Bar::new(4.0, 10.0)],
+        )
+        .stack_on(&[&below]);
+
+        let base_offsets: Vec<_> = above.bars.iter().map(|bar| bar.base_offset).collect();
+        assert_eq!(base_offsets, vec![Some(2.0), Some(0.0), None]);
     }
 }
