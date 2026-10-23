@@ -1178,9 +1178,14 @@ impl<'a> Plot<'a> {
         if self.allow_boxed_zoom {
             // Save last click to allow boxed zooming
             if response.drag_started() && response.dragged_by(self.boxed_zoom_pointer_button) {
-                // it would be best for egui that input has a memory of the last click pos
-                // because it's a common pattern
-                mem.last_click_pos_for_zoom = response.hover_pos();
+                // Use where the button was pressed, not where the drag was first detected,
+                // since egui only reports a drag after the pointer has moved a bit.
+                // Convert to layer-local coordinates, like `response.hover_pos()` does.
+                mem.last_click_pos_for_zoom = ui.input(|i| i.pointer.press_origin()).map(|pos| {
+                    ui.ctx()
+                        .layer_transform_from_global(response.layer_id)
+                        .map_or(pos, |from_global| from_global * pos)
+                });
             }
             let box_start_pos = mem.last_click_pos_for_zoom;
             let box_end_pos = response.hover_pos();
@@ -2228,5 +2233,73 @@ mod plot_tests {
         assert!((final_bounds.min[1] - MIN[1]).abs() <= f64::EPSILON);
         assert!((final_bounds.max[0] - MAX[0]).abs() <= f64::EPSILON);
         assert!((final_bounds.max[1] - MAX[1]).abs() <= f64::EPSILON);
+    }
+
+    /// Test that a boxed zoom starts where the button was pressed,
+    /// not where egui first detected the drag.
+    #[test]
+    fn boxed_zoom_starts_at_press_origin() {
+        crate::utils::init_test_logger();
+
+        let press_pos = Pos2::new(200.0, 150.0);
+        let drag_detected_pos = Pos2::new(230.0, 180.0);
+        let release_pos = Pos2::new(400.0, 300.0);
+
+        let mut harness = Harness::new_ui_state(
+            |ui, (transform_before_zoom, bounds): &mut (Option<PlotTransform>, PlotBounds)| {
+                let plot = Plot::new("test_plot").set_margin_fraction(Vec2::splat(0.0));
+
+                plot.show(ui, |plot_ui| {
+                    plot_ui.points(Points::new("filler", vec![[-10.0, -10.0], [10.0, 10.0]]));
+                    transform_before_zoom.get_or_insert(*plot_ui.transform());
+                    *bounds = plot_ui.plot_bounds();
+                });
+            },
+            (None, PlotBounds::NOTHING),
+        );
+        harness.run();
+        // Reset, so the transform is captured after the plot has settled on the data bounds:
+        harness.state_mut().0 = None;
+
+        let pointer_button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        harness.hover_at(press_pos);
+        harness.run();
+        harness.event(pointer_button(press_pos, true));
+        harness.run();
+        harness.hover_at(drag_detected_pos);
+        harness.run();
+        harness.hover_at(release_pos);
+        harness.run();
+        harness.event(pointer_button(release_pos, false));
+        harness.run();
+
+        let (transform_before_zoom, final_bounds) = harness.state();
+        let Some(transform_before_zoom) = transform_before_zoom else {
+            panic!("plot was never shown");
+        };
+        let expected_min = transform_before_zoom.value_from_position(press_pos);
+        let expected_max = transform_before_zoom.value_from_position(release_pos);
+        let tolerance = 1e-6;
+        assert!(
+            (final_bounds.min[0] - expected_min.x).abs() < tolerance,
+            "{final_bounds:?}"
+        );
+        assert!(
+            (final_bounds.max[1] - expected_min.y).abs() < tolerance,
+            "{final_bounds:?}"
+        );
+        assert!(
+            (final_bounds.max[0] - expected_max.x).abs() < tolerance,
+            "{final_bounds:?}"
+        );
+        assert!(
+            (final_bounds.min[1] - expected_max.y).abs() < tolerance,
+            "{final_bounds:?}"
+        );
     }
 }
